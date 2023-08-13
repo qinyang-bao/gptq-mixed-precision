@@ -40,6 +40,7 @@ class Quantizer(nn.Module):
         shape = x.shape
         if self.perchannel:
             if weight:
+                # W: (hidden_dim_output, hidden_dim_input)
                 x = x.flatten(1)
             else:
                 if len(shape) == 4:
@@ -52,6 +53,7 @@ class Quantizer(nn.Module):
         else:
             x = x.flatten().unsqueeze(0)
 
+        # quantize each row
         tmp = torch.zeros(x.shape[0], device=dev)
         xmin = torch.minimum(x.min(1)[0], tmp)
         xmax = torch.maximum(x.max(1)[0], tmp)
@@ -61,6 +63,7 @@ class Quantizer(nn.Module):
             tmp = xmin < 0
             if torch.any(tmp):
                 xmin[tmp] = -xmax[tmp]
+                # min = max = 0, sparsity???
         tmp = (xmin == 0) & (xmax == 0)
         xmin[tmp] = -1
         xmax[tmp] = +1
@@ -113,6 +116,7 @@ class Quantizer(nn.Module):
             self.scale = self.scale.reshape((1, 1, -1))
             self.zero = self.zero.reshape((1, 1, -1)) 
         if len(shape) == 2:
+            # scale, zero: (1, hidden_dim_output i.e. num_rows, 1)
             self.scale = self.scale.unsqueeze(0)
             self.zero = self.zero.unsqueeze(0)
 

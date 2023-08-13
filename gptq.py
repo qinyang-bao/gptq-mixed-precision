@@ -38,7 +38,9 @@ class GPTQ:
         tmp = inp.shape[0]
         if isinstance(self.layer, nn.Linear) or isinstance(self.layer, transformers.Conv1D):
             if len(inp.shape) == 3:
+                # inp: (batch*seq_length, hidden_dim)
                 inp = inp.reshape((-1, inp.shape[-1]))
+            # inp: (hidden_dim, batch*seq_length)
             inp = inp.t()
         if isinstance(self.layer, nn.Conv2d):
             unfold = nn.Unfold(
@@ -50,20 +52,29 @@ class GPTQ:
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
+
+        #  hmm, this and the 2/self.nsamples scale makes sure that the scale
+        #  factor is always 2/N...But why don't we just apply the scale at the
+        #  end?? Is it just to avoid having to add a line after all the add_batch calls?
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         # inp = inp.float()
+
         inp = math.sqrt(2 / self.nsamples) * inp.float()
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
+
+        #  H: (hidden_dim, hidden_dim)
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
         self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False
     ):
+        # W: (hidden_dim_output, hidden_dim_input)
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
         if isinstance(self.layer, transformers.Conv1D):
+            # Con1D from huggingface is like a linear layer, but with transposed weights
             W = W.t()
         W = W.float()
 
@@ -76,8 +87,10 @@ class GPTQ:
         del self.H
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
+        # for all rows, the dead columns => 0, cols = hidden_dim_input
         W[:, dead] = 0
 
+        # quantize groups before permuting the columns
         if static_groups:
             import copy
             groups = []
@@ -114,6 +127,7 @@ class GPTQ:
             Hinv1 = Hinv[i1:i2, i1:i2]
 
             for i in range(count):
+                # w: (rows)
                 w = W1[:, i]
                 d = Hinv1[i, i]
 
@@ -128,18 +142,21 @@ class GPTQ:
                         self.quantizer = groups[idx // groupsize]
 
                 q = quantize(
+                    # w: (rows, 1), this does align with scale and zero dimension
                     w.unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
                 ).flatten()
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 err1 = (w - q) / d
+                # err1: (rows, 1), Hinv1: (1, block_size-1) => matmul: (rows, block_size-i)
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
 
+            # (rows, block_size) @ (block_size, cols -i2) = (rows, cols-i2)
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
             if DEBUG:
@@ -155,6 +172,7 @@ class GPTQ:
         if actorder:
             Q = Q[:, invperm]
 
+        # Huggingface Conv1D has transposed weights of a linear layer
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)

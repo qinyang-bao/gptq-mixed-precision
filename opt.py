@@ -94,6 +94,7 @@ def opt_sequential(model, dataloader, dev):
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
+            # this pass is just to add the batches to get the H
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
         for h in handles:
             h.remove()
@@ -107,6 +108,7 @@ def opt_sequential(model, dataloader, dev):
             quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
             gptq[name].free()
         for j in range(args.nsamples):
+            #  this second pass calculates the input for the next layer
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
 
         layers[i] = layer.cpu()
