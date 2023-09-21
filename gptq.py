@@ -67,7 +67,8 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, get_saliency=False,
+        outlier_relative_threshold=0.2
     ):
         # W: (hidden_dim_output, hidden_dim_input)
         W = self.layer.weight.data.clone()
@@ -116,6 +117,16 @@ class GPTQ:
         H = torch.linalg.cholesky(H, upper=True)
         Hinv = H
 
+        if get_saliency:
+                        # mean(per column variance / (H diag)^2)
+                        # This is later compared with (quant(w)-w) / (H diag)^2, so we are
+                        # identifying outliers as the percentage of the quant_delta with respect to
+                        # the variance of the weights.
+            outlier_scale = (W.var(dim=0) / torch.diag(H).square()).mean().item()
+            unstructured_outlier_threshold = outlier_relative_threshold * outlier_scale
+            saliency_wo_outliers = torch.zeros_like(W)
+            unstructured_outlier_mask = torch.zeros_like(W, dtype=torch.bool)
+
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
             count = i2 - i1
@@ -125,6 +136,10 @@ class GPTQ:
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
+
+            if get_saliency:
+                saliency_wo_outliers1 = torch.zeros_like(W1)
+                unstructured_outlier_mask1 = torch.zeros_like(W1, dtype=torch.bool)
 
             for i in range(count):
                 # w: (rows)
@@ -149,12 +164,35 @@ class GPTQ:
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 err1 = (w - q) / d
+                if get_saliency and unstructured_outlier_threshold != float("inf"):
+
+                    unstructured_outlier_mask1[:, i] = (
+                        err1.square() > unstructured_outlier_threshold
+                    )
+                    
+                    # re-quantize without outliers
+                    is_outlier = unstructured_outlier_mask1[:, i].float().float()
+                    weight_i_quantized_wo_outliers = quantize(
+                        # 0 always stays as 0 after quantization
+                        (w * (1 - is_outlier)).unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
+                    ).flatten()
+
+                    q =  weight_i_quantized_wo_outliers * (1 - is_outlier) + w * is_outlier
+                    Q1[:, i] = q
+
+                    saliency_wo_outliers1[:, i] = ((w - q)*(1-is_outlier))**2 / d**2
+
+                err1 = (w - q) / d
                 # err1: (rows, 1), Hinv1: (1, block_size-1) => matmul: (rows, block_size-i)
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
+
+            if get_saliency:
+                saliency_wo_outliers[:, i1:i2] = saliency_wo_outliers1 / 2
+                unstructured_outlier_mask[:, i1:i2] = unstructured_outlier_mask1
 
             # (rows, block_size) @ (block_size, cols -i2) = (rows, cols-i2)
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
@@ -178,6 +216,11 @@ class GPTQ:
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
         if DEBUG:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+
+        if get_saliency:
+            return Losses, saliency_wo_outliers, Q, unstructured_outlier_mask
+        else:
+            return Losses, Losses, Q, Hinv
 
     def free(self):
         if DEBUG:

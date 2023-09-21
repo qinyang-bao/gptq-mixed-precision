@@ -1,4 +1,5 @@
 import time
+import os
 
 import torch
 import torch.nn as nn
@@ -102,9 +103,43 @@ def opt_sequential(model, dataloader, dev):
         for name in subset:
             print(i, name)
             print('Quantizing ...')
-            gptq[name].fasterquant(
-                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
+            Losses, saliency_wo_outliers, W, Hinv = gptq[name].fasterquant(
+                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups,
+                get_saliency=args.get_saliency, outlier_relative_threshold=args.outlier_threshold
             )
+            save_dir = f"saliency-outlier-{args.model.split('/')[-1]}-cali-{args.dataset}"
+            os.makedirs(save_dir, exist_ok=True)
+            try:
+                torch.save(W.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.weights' % (i, name)))
+            except Exception as e:
+                print(e)
+            if args.get_saliency:
+                # try:
+                #     torch.save(Losses.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.saliency' % (i, name)))
+                # except Exception as e:
+                #     print(e)
+                try:
+                    torch.save(saliency_wo_outliers.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.saliency_wo_outliers' % (i, name)))
+                except Exception as e:
+                    print(e)
+                # try:
+                #     torch.save(W.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.weights' % (i, name)))
+                # except Exception as e:
+                #     print(e)
+                # try:
+                #     torch.save(Hinv.cpu, os.path.join(save_dir, 'model.decoder.layers.%d.%s.Hinv' % (i, name)))
+                # except Exception as e:
+                #     print(e)
+                # try:
+                #     torch.save(W.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.weights' % (i, name)))
+                # except Exception as e:
+                #     print(e)
+                # try:
+                #     torch.save(Hinv.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.mask' % (i, name)))
+                # except Exception as e:
+                    print(e)
+
+
             quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
             gptq[name].free()
         for j in range(args.nsamples):
@@ -433,6 +468,16 @@ if __name__ == '__main__':
     parser.add_argument(
         '--static-groups', action='store_true',
         help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
+    )
+    parser.add_argument(
+        '--get-saliency', action='store_true',
+        help='Whether to get saliency values.'
+    )
+    parser.add_argument(
+        "--outlier-threshold",
+        type=float,
+        default=float("inf"),
+        help="relative threshold for outliers; higher threshold = more outliers.",
     )
 
     args = parser.parse_args()
