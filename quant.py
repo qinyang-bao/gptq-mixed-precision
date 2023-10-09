@@ -4,9 +4,9 @@ import torch.nn as nn
 
 
 def quantize(x, scale, zero, maxq):
-    if maxq < 0:
+    if torch.all(maxq < 0):
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
-    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
+    q = torch.clamp(torch.round(x / scale) + zero, torch.zeros_like(maxq), maxq)
     return scale * (q - zero)
 
 class Quantizer(nn.Module):
@@ -68,11 +68,11 @@ class Quantizer(nn.Module):
         xmin[tmp] = -1
         xmax[tmp] = +1
 
-        if self.maxq < 0:
+        if torch.all(self.maxq < 0):
           self.scale = xmax
           self.zero = xmin
         else:
-          self.scale = (xmax - xmin) / self.maxq
+          self.scale = (xmax - xmin) / self.maxq.reshape(-1)
           if self.sym:
               self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
           else:
@@ -84,7 +84,7 @@ class Quantizer(nn.Module):
                 p = 1 - i / self.grid 
                 xmin1 = p * xmin
                 xmax1 = p * xmax
-                scale1 = (xmax1 - xmin1) / self.maxq
+                scale1 = (xmax1 - xmin1) / self.maxq.reshape(-1)
                 zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
                 q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
                 q -= x
@@ -126,7 +126,7 @@ class Quantizer(nn.Module):
         return x
 
     def enabled(self):
-        return self.maxq > 0
+        return torch.all(self.maxq > 0)
 
     def ready(self):
         return torch.all(self.scale != 0)

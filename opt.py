@@ -1,6 +1,6 @@
 import time
 import os
-
+import csv
 import torch
 import torch.nn as nn
 
@@ -103,25 +103,36 @@ def opt_sequential(model, dataloader, dev):
         for name in subset:
             print(i, name)
             print('Quantizing ...')
-            Losses, saliency_wo_outliers, W, Hinv = gptq[name].fasterquant(
+            Losses, saliency_wo_outliers, Q, W, Hinv, losses = gptq[name].fasterquant(
                 percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups,
                 get_saliency=args.get_saliency, outlier_relative_threshold=args.outlier_threshold
             )
-            save_dir = f"saliency-outlier-{args.model.split('/')[-1]}-cali-{args.dataset}"
+            save_dir = f"mixed-precision-losses-{args.model.split('/')[-1]}-cali-{args.dataset}"
             os.makedirs(save_dir, exist_ok=True)
-            try:
-                torch.save(W.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.weights' % (i, name)))
-            except Exception as e:
-                print(e)
+            if not os.path.exists(os.path.join(save_dir, "mixed_precision_losses.csv")):
+                with open(os.path.join(save_dir, "mixed_precision_losses.csv"), "a") as f:
+                    csvwriter = csv.writer(f)
+                    csvwriter.writerow(["High bitlength percentage"] + list(map(str, range(0, 110, 10))))
+            with open(os.path.join(save_dir, "mixed_precision_losses.csv"), "a") as f:
+                csvwriter = csv.writer(f)
+                csvwriter.writerow([name]+list(losses))
+            # try:
+            #     torch.save(Q.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.weights' % (i, name)))
+            # except Exception as e:
+            #     print(e)
+            # try:
+            #     torch.save(W.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.weights_before_quant' % (i, name)))
+            # except Exception as e:
+            #     print(e)
             if args.get_saliency:
                 # try:
                 #     torch.save(Losses.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.saliency' % (i, name)))
                 # except Exception as e:
                 #     print(e)
-                try:
-                    torch.save(saliency_wo_outliers.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.saliency_wo_outliers' % (i, name)))
-                except Exception as e:
-                    print(e)
+                # try:
+                #     torch.save(saliency_wo_outliers.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.saliency_wo_outliers' % (i, name)))
+                # except Exception as e:
+                #     print(e)
                 # try:
                 #     torch.save(W.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.weights' % (i, name)))
                 # except Exception as e:
@@ -131,13 +142,10 @@ def opt_sequential(model, dataloader, dev):
                 # except Exception as e:
                 #     print(e)
                 # try:
-                #     torch.save(W.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.weights' % (i, name)))
-                # except Exception as e:
-                #     print(e)
-                # try:
                 #     torch.save(Hinv.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.mask' % (i, name)))
                 # except Exception as e:
-                    print(e)
+                #     print(e)
+                pass
 
 
             quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
