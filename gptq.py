@@ -127,125 +127,134 @@ class GPTQ:
         saliency = ((W - Q) ** 2 / torch.diag(Hinv).reshape(1, -1) ** 2)/2
         # sort by row
 
-        mixed_percentage_losses = np.zeros(11)
+        mixed_percentage_losses_min = np.zeros(11)
+        mixed_percentage_losses_max = np.zeros(11)
         for mixed_percentage_idx in range(0, 11,1):
-            _H = H.clone()
-            _W = W.clone()
+            if mixed_percentage_idx == 0 or mixed_percentage_idx == 10:
+                seeds = [0]
+            else:
+                seeds = [0,5,10,15,20]
+            seed_losses = np.zeros(len(seeds))
+            for seed_idx, seed in enumerate(seeds):
 
-            print(f"Tring mixed precision high bitlength percentage {mixed_percentage_idx*10}:") 
-            perm = torch.argsort(torch.mean(saliency, axis=1), descending=True)
-            # torch.manual_seed(42)
-            # perm = torch.randperm(saliency.size(0))
-            bitlength = torch.ones_like(self.quantizer.scale) * 4
-            bitlength[bitlength.size(0)//10*mixed_percentage_idx:]  = 3
-            bitlength = bitlength[perm]
-            self.quantizer.maxq = torch.pow(2, bitlength) - 1
-            self.quantizer.find_params(W, weight=True)
+                _H = H.clone()
+                _W = W.clone()
 
-            if actorder:
-                perm = torch.argsort(torch.mean(saliency, axis=0), descending=True)
-                # perm = torch.argsort(torch.diag(H), descending=True)
-                _W = _W[:, perm]
-                _H = _H[perm][:, perm]
-                invperm = torch.argsort(perm) 
+                print(f"Tring mixed precision high bitlength percentage {mixed_percentage_idx*10}, seed {seed}:") 
+                # perm = torch.argsort(torch.mean(saliency, axis=1), descending=True)
+                torch.manual_seed(seed)
+                perm = torch.randperm(saliency.size(0))
+                
+                bitlength = torch.ones_like(self.quantizer.scale) * 4
+                bitlength[bitlength.size(0)//10*mixed_percentage_idx:]  = 3
+                bitlength = bitlength[perm]
+                self.quantizer.maxq = torch.pow(2, bitlength) - 1
+                self.quantizer.find_params(W, weight=True)
 
-            damp = percdamp * torch.mean(torch.diag(H))
-            diag = torch.arange(self.columns, device=self.dev)
-            _H[diag, diag] += damp
-            _H = torch.linalg.cholesky(_H)
-            _H = torch.cholesky_inverse(_H)
-            _H = torch.linalg.cholesky(_H, upper=True)
-            Hinv = _H
+                if actorder:
+                    # perm = torch.argsort(torch.mean(saliency, axis=0), descending=True)
+                    perm = torch.argsort(torch.diag(H), descending=True)
+                    _W = _W[:, perm]
+                    _H = _H[perm][:, perm]
+                    invperm = torch.argsort(perm) 
 
-            if get_saliency:
-                            # mean(per column variance / (H diag)^2)
-                            # This is later compared with (quant(w)-w) / (H diag)^2, so we are
-                            # identifying outliers as the percentage of the quant_delta with respect to
-                            # the variance of the weights.
-                outlier_scale = (_W.var(dim=0) / torch.diag(_H).square()).mean().item()
-                unstructured_outlier_threshold = outlier_relative_threshold * outlier_scale
-                saliency_wo_outliers = torch.zeros_like(W)
-                unstructured_outlier_mask = torch.zeros_like(W, dtype=torch.bool)
-
-            for i1 in range(0, self.columns, blocksize):
-                i2 = min(i1 + blocksize, self.columns)
-                count = i2 - i1
-
-                W1 = _W[:, i1:i2].clone()
-                Q1 = torch.zeros_like(W1)
-                Err1 = torch.zeros_like(W1)
-                Losses1 = torch.zeros_like(W1)
-                Hinv1 = Hinv[i1:i2, i1:i2]
+                damp = percdamp * torch.mean(torch.diag(H))
+                diag = torch.arange(self.columns, device=self.dev)
+                _H[diag, diag] += damp
+                _H = torch.linalg.cholesky(_H)
+                _H = torch.cholesky_inverse(_H)
+                _H = torch.linalg.cholesky(_H, upper=True)
+                Hinv = _H
 
                 if get_saliency:
-                    saliency_wo_outliers1 = torch.zeros_like(W1)
-                    unstructured_outlier_mask1 = torch.zeros_like(W1, dtype=torch.bool)
+                                # mean(per column variance / (H diag)^2)
+                                # This is later compared with (quant(w)-w) / (H diag)^2, so we are
+                                # identifying outliers as the percentage of the quant_delta with respect to
+                                # the variance of the weights.
+                    outlier_scale = (_W.var(dim=0) / torch.diag(_H).square()).mean().item()
+                    unstructured_outlier_threshold = outlier_relative_threshold * outlier_scale
+                    saliency_wo_outliers = torch.zeros_like(W)
+                    unstructured_outlier_mask = torch.zeros_like(W, dtype=torch.bool)
 
-                for i in range(count):
-                    # w: (rows)
-                    w = W1[:, i]
-                    d = Hinv1[i, i]
+                for i1 in range(0, self.columns, blocksize):
+                    i2 = min(i1 + blocksize, self.columns)
+                    count = i2 - i1
 
-                    if groupsize != -1:
-                        if not static_groups:
-                            if (i1 + i) % groupsize == 0:
-                                self.quantizer.find_params(W[:, (i1 + i):(i1 + i + groupsize)], weight=True)
-                        else:
-                            idx = i1 + i
-                            if actorder:
-                                idx = perm[idx]
-                            self.quantizer = groups[idx // groupsize]
+                    W1 = _W[:, i1:i2].clone()
+                    Q1 = torch.zeros_like(W1)
+                    Err1 = torch.zeros_like(W1)
+                    Losses1 = torch.zeros_like(W1)
+                    Hinv1 = Hinv[i1:i2, i1:i2]
 
-                    q = quantize(
-                        # w: (rows, 1), this does align with scale and zero dimension
-                        w.unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
-                    ).flatten()
-                    Q1[:, i] = q
-                    Losses1[:, i] = (w - q) ** 2 / d ** 2
+                    if get_saliency:
+                        saliency_wo_outliers1 = torch.zeros_like(W1)
+                        unstructured_outlier_mask1 = torch.zeros_like(W1, dtype=torch.bool)
 
-                    err1 = (w - q) / d
-                    if get_saliency and unstructured_outlier_threshold != float("inf"):
+                    for i in range(count):
+                        # w: (rows)
+                        w = W1[:, i]
+                        d = Hinv1[i, i]
 
-                        unstructured_outlier_mask1[:, i] = (
-                            err1.square() > unstructured_outlier_threshold
-                            # torch.abs(w) < 1e-3
-                        )
-                        # unstructured_outlier_mask1[:, i] = (
-                        #     torch.rand(err1.size()) < 0.01
-                        # )
-                        
-                        # re-quantize without outliers
-                        is_outlier = unstructured_outlier_mask1[:, i].float()
-                        weight_i_quantized_wo_outliers = quantize(
-                            # 0 always stays as 0 after quantization
-                            (w * (1 - is_outlier)).unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
+                        if groupsize != -1:
+                            if not static_groups:
+                                if (i1 + i) % groupsize == 0:
+                                    self.quantizer.find_params(W[:, (i1 + i):(i1 + i + groupsize)], weight=True)
+                            else:
+                                idx = i1 + i
+                                if actorder:
+                                    idx = perm[idx]
+                                self.quantizer = groups[idx // groupsize]
+
+                        q = quantize(
+                            # w: (rows, 1), this does align with scale and zero dimension
+                            w.unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
                         ).flatten()
-
-                        q =  weight_i_quantized_wo_outliers * (1 - is_outlier) + w * is_outlier
                         Q1[:, i] = q
+                        Losses1[:, i] = (w - q) ** 2 / d ** 2
 
-                        saliency_wo_outliers1[:, i] = ((w - q)*(1-is_outlier))**2 / d**2
+                        err1 = (w - q) / d
+                        if get_saliency and unstructured_outlier_threshold != float("inf"):
 
-                    err1 = (w - q) / d
-                    # err1: (rows, 1), Hinv1: (1, block_size-1) => matmul: (rows, block_size-i)
-                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                    Err1[:, i] = err1
+                            unstructured_outlier_mask1[:, i] = (
+                                err1.square() > unstructured_outlier_threshold
+                                # torch.abs(w) < 1e-3
+                            )
+                            # unstructured_outlier_mask1[:, i] = (
+                            #     torch.rand(err1.size()) < 0.01
+                            # )
+                            
+                            # re-quantize without outliers
+                            is_outlier = unstructured_outlier_mask1[:, i].float()
+                            weight_i_quantized_wo_outliers = quantize(
+                                # 0 always stays as 0 after quantization
+                                (w * (1 - is_outlier)).unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
+                            ).flatten()
 
-                Q[:, i1:i2] = Q1
-                Losses[:, i1:i2] = Losses1 / 2
+                            q =  weight_i_quantized_wo_outliers * (1 - is_outlier) + w * is_outlier
+                            Q1[:, i] = q
 
-                if get_saliency:
-                    saliency_wo_outliers[:, i1:i2] = saliency_wo_outliers1 / 2
-                    unstructured_outlier_mask[:, i1:i2] = unstructured_outlier_mask1
+                            saliency_wo_outliers1[:, i] = ((w - q)*(1-is_outlier))**2 / d**2
 
-                # (rows, block_size) @ (block_size, cols -i2) = (rows, cols-i2)
-                _W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                        err1 = (w - q) / d
+                        # err1: (rows, 1), Hinv1: (1, block_size-1) => matmul: (rows, block_size-i)
+                        W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                        Err1[:, i] = err1
 
-                if DEBUG:
-                    self.layer.weight.data[:, :i2] = Q[:, :i2]
-                    self.layer.weight.data[:, i2:] = W[:, i2:]
-                    print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-                    print(torch.sum(Losses))
+                    Q[:, i1:i2] = Q1
+                    Losses[:, i1:i2] = Losses1 / 2
+
+                    if get_saliency:
+                        saliency_wo_outliers[:, i1:i2] = saliency_wo_outliers1 / 2
+                        unstructured_outlier_mask[:, i1:i2] = unstructured_outlier_mask1
+
+                    # (rows, block_size) @ (block_size, cols -i2) = (rows, cols-i2)
+                    _W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+
+                    if DEBUG:
+                        self.layer.weight.data[:, :i2] = Q[:, :i2]
+                        self.layer.weight.data[:, i2:] = W[:, i2:]
+                        print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+                        print(torch.sum(Losses))
 
         # saliency = Losses
         # # sort by row
@@ -355,11 +364,14 @@ class GPTQ:
 
 
 
-            torch.cuda.synchronize()
-            loss_sum = torch.sum(Losses).item()
-            print('time %.2f' % (time.time() - tick))
-            print('error', loss_sum)
-            mixed_percentage_losses[mixed_percentage_idx] = loss_sum
+                torch.cuda.synchronize()
+                loss_sum = torch.sum(Losses).item()
+                print('time %.2f' % (time.time() - tick))
+                print('error', loss_sum)
+                seed_losses[seed_idx] = loss_sum
+
+            mixed_percentage_losses_min[mixed_percentage_idx] = np.min(seed_losses)
+            mixed_percentage_losses_max[mixed_percentage_idx] = np.max(seed_losses)
 
         if actorder:
             Q = Q[:, invperm]
@@ -372,9 +384,9 @@ class GPTQ:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 
         if get_saliency:
-            return Losses, saliency_wo_outliers, Q, W, unstructured_outlier_mask, mixed_percentage_losses
+            return Losses, saliency_wo_outliers, Q, W, unstructured_outlier_mask, mixed_percentage_losses_min, mixed_percentage_losses_max
         else:
-            return Losses, Losses, Q, W, Hinv, mixed_percentage_losses
+            return Losses, Losses, Q, W, Hinv, mixed_percentage_losses_min, mixed_percentage_losses_max
 
     def free(self):
         if DEBUG:

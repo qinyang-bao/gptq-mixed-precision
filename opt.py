@@ -103,19 +103,27 @@ def opt_sequential(model, dataloader, dev):
         for name in subset:
             print(i, name)
             print('Quantizing ...')
-            Losses, saliency_wo_outliers, Q, W, Hinv, losses = gptq[name].fasterquant(
+            Losses, saliency_wo_outliers, Q, W, Hinv, losses_min, losses_max = gptq[name].fasterquant(
                 percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups,
                 get_saliency=args.get_saliency, outlier_relative_threshold=args.outlier_threshold
             )
             save_dir = f"mixed-precision-losses-{args.model.split('/')[-1]}-cali-{args.dataset}"
             os.makedirs(save_dir, exist_ok=True)
-            if not os.path.exists(os.path.join(save_dir, "mixed_precision_losses.csv")):
-                with open(os.path.join(save_dir, "mixed_precision_losses.csv"), "a") as f:
+            if not os.path.exists(os.path.join(save_dir, "random_mixed_precision_losses_min_spqr.csv")):
+                with open(os.path.join(save_dir, "random_mixed_precision_losses_min_spqr.csv"), "a") as f:
                     csvwriter = csv.writer(f)
                     csvwriter.writerow(["High bitlength percentage"] + list(map(str, range(0, 110, 10))))
-            with open(os.path.join(save_dir, "mixed_precision_losses.csv"), "a") as f:
+            with open(os.path.join(save_dir, "random_mixed_precision_losses_min_spqr.csv"), "a") as f:
                 csvwriter = csv.writer(f)
-                csvwriter.writerow([name]+list(losses))
+                csvwriter.writerow([name]+list(losses_min))
+
+            if not os.path.exists(os.path.join(save_dir, "random_mixed_precision_losses_max_spqr.csv")):
+                with open(os.path.join(save_dir, "random_mixed_precision_losses_max_spqr.csv"), "a") as f:
+                    csvwriter = csv.writer(f)
+                    csvwriter.writerow(["High bitlength percentage"] + list(map(str, range(0, 110, 10))))
+            with open(os.path.join(save_dir, "random_mixed_precision_losses_max_spqr.csv"), "a") as f:
+                csvwriter = csv.writer(f)
+                csvwriter.writerow([name]+list(losses_max))
             # try:
             #     torch.save(Q.cpu(), os.path.join(save_dir, 'model.decoder.layers.%d.%s.weights' % (i, name)))
             # except Exception as e:
